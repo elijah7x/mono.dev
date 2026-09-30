@@ -27,6 +27,7 @@ import {
 import { submitWithSettlement } from "./model/managedSubmission";
 import {
   prepareWorkerCheckpoint,
+  settleWorkerCheckpoint,
   trackSessionEdits,
 } from "./model/sessionCheckpoint";
 import {
@@ -10000,6 +10001,7 @@ function Workspace({
           (session) => session.id === run.leadId,
         );
         if (!lead) throw new Error("Lead session is unavailable");
+        let createdCheckout = false;
         const workspace =
           task.workspacePolicy === "shared"
             ? workspaceIdentity(projectCwd, leadCheckoutCwd)
@@ -10023,15 +10025,22 @@ function Workspace({
               : await createOrchestrationWorktree(
                   leadCheckoutCwd,
                   orchestrationWorktreeBranchName(task.id),
-                ).then((tree) =>
-                  workspaceIdentity(
+                ).then((tree) => {
+                  createdCheckout = tree.created;
+                  return workspaceIdentity(
                     projectCwd,
                     tree.path,
                     tree.branch ?? undefined,
-                  ),
-                );
+                  );
+                });
         const checkoutCwd = workspace.checkoutCwd;
-        await prepareWorkerCheckpoint(task, checkoutCwd);
+        await prepareWorkerCheckpoint(
+          task,
+          checkoutCwd,
+          createdCheckout
+            ? () => removeOrchestrationWorktree(leadCheckoutCwd, checkoutCwd)
+            : undefined,
+        );
         const scratchDir = await invoke<string>("control_attach_worker", {
           leadId: run.leadId,
           sessionId: task.sessionId,
@@ -10136,15 +10145,16 @@ function Workspace({
         const session = sessionsRef.current.find(
           (entry) => entry.id === task.sessionId,
         );
-        if (session)
-          await Promise.all(
-            sessionChildHarnesses(session).map((harness) =>
-              stopHarnessSession(harness, task.sessionId),
-            ),
-          );
-        await invoke("harness_kill", { sessionId: task.sessionId });
-        await invoke("control_turn_finished", { sessionId: task.sessionId });
-        await flushSessionCheckpoint(task.sessionId);
+        await settleWorkerCheckpoint(task, fromCwd, async () => {
+          if (session)
+            await Promise.all(
+              sessionChildHarnesses(session).map((harness) =>
+                stopHarnessSession(harness, task.sessionId),
+              ),
+            );
+          await invoke("harness_kill", { sessionId: task.sessionId });
+          await invoke("control_turn_finished", { sessionId: task.sessionId });
+        });
         const listed = await listWorktrees(orchestrationCheckoutCwd(run));
         const workerTree = listed.worktrees.find((tree) =>
           sameProjectPath(tree.path, fromCwd),
@@ -10170,12 +10180,26 @@ function Workspace({
         const workspace = task.workspace;
         if (!workspace || workspace.kind !== "worktree") return true;
         const path = workspace.checkoutCwd;
-        await flushSessionCheckpoint(task.sessionId);
         const listed = await listWorktrees(orchestrationCheckoutCwd(run));
         const exists = listed.worktrees.some(
           (tree) => pathKey(tree.path) === pathKey(path),
         );
         if (!exists && onlyIfUnchanged) return false;
+        const session = sessionsRef.current.find(
+          (entry) => entry.id === task.sessionId,
+        );
+        if (exists) {
+          onStop(task.sessionId, true);
+          if (session)
+            await Promise.all(
+              sessionChildHarnesses(session).map((harness) =>
+                stopHarnessSession(harness, task.sessionId),
+              ),
+            );
+          await invoke("harness_kill", { sessionId: task.sessionId });
+          await invoke("control_turn_finished", { sessionId: task.sessionId });
+          await flushSessionCheckpoint(task.sessionId);
+        }
         const workerTree = listed.worktrees.find(
           (tree) => pathKey(tree.path) === pathKey(path),
         );
@@ -10205,21 +10229,6 @@ function Workspace({
         }
 
         if (exists) {
-          onStop(task.sessionId, true);
-          const session = sessionsRef.current.find(
-            (entry) => entry.id === task.sessionId,
-          );
-          if (session) {
-            await Promise.all(
-              sessionChildHarnesses(session).map((harness) =>
-                stopHarnessSession(harness, task.sessionId),
-              ),
-            );
-          }
-          await invoke("harness_kill", { sessionId: task.sessionId });
-          await invoke("control_turn_finished", {
-            sessionId: task.sessionId,
-          });
           await flushSessionWrites();
           checkOpenWorktreeFiles(path);
           const removed = await removeOrchestrationWorktree(
