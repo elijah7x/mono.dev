@@ -32,12 +32,16 @@ use objc2::runtime::NSObject;
 use objc2::{
     define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly,
 };
+#[cfg(debug_assertions)]
+use objc2_app_kit::NSImage;
 use objc2_app_kit::{
     NSApplication, NSAutoresizingMaskOptions, NSColor, NSMenu, NSMenuItem,
     NSRequestUserAttentionType, NSTitlebarSeparatorStyle, NSUserInterfaceItemIdentification,
     NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
     NSWindow, NSWindowOrderingMode,
 };
+#[cfg(debug_assertions)]
+use objc2_foundation::NSData;
 use objc2_foundation::NSString;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tauri::{AppHandle, Manager, WebviewWindow, WindowEvent};
@@ -536,7 +540,9 @@ pub(crate) fn ensure_dev_bundle() {
 }
 
 /// Tauri sets `applicationIconImage` on Ready in dev, which undoes the bundle
-/// icon. Clearing it restores Icon Services.
+/// icon. Replace it with the DEV-badged icon so the dev app is told apart from
+/// the release app it shares a bundle id with. The Dock text badge can't do
+/// that job: macOS hides it whenever notifications are denied for the bundle id.
 #[cfg(debug_assertions)]
 pub(crate) fn prefer_bundle_dock_icon() {
     if !current_exe_is_bundled() {
@@ -546,18 +552,27 @@ pub(crate) fn prefer_bundle_dock_icon() {
         return;
     };
     let app = NSApplication::sharedApplication(mtm);
-    unsafe { app.setApplicationIconImage(None) };
+    let icon = dev_dock_icon();
+    unsafe { app.setApplicationIconImage(icon.as_deref()) };
     app.dockTile().display();
-    // Tauri assigns the embedded bitmap after Ready. Clear again so Icon
-    // Services keeps the composed AppIcon (squircle fill + artwork).
+    // Tauri assigns the embedded bitmap after Ready. Set ours again.
     unsafe {
         let _: () = msg_send![
             &app,
             performSelector: sel!(setApplicationIconImage:),
-            withObject: None::<&objc2::runtime::AnyObject>,
+            withObject: icon.as_deref(),
             afterDelay: 0.3_f64
         ];
     }
+}
+
+/// Rendered by `scripts/make-dev-dock-icon.swift`: the app icon plus a DEV pill.
+#[cfg(debug_assertions)]
+const DEV_DOCK_ICON: &[u8] = include_bytes!("../icons/dev-dock.png");
+
+#[cfg(debug_assertions)]
+fn dev_dock_icon() -> Option<Retained<NSImage>> {
+    NSImage::initWithData(NSImage::alloc(), &NSData::with_bytes(DEV_DOCK_ICON))
 }
 
 #[cfg(debug_assertions)]
@@ -644,7 +659,7 @@ fn write_dev_bundle_icons(app: &Path, app_name: &str) -> Result<(), String> {
 
 /// Must match `CFBundleIdentifier` in the generated dev bundle plist and tauri.conf.json.
 #[cfg(debug_assertions)]
-const DEV_BUNDLE_DEFAULT_NAME: &str = "MonoCode";
+const DEV_BUNDLE_DEFAULT_NAME: &str = "mono.dev";
 #[cfg(debug_assertions)]
 const DEV_BUNDLE_NAME_ENV: &str = "MONOCODE_DEV_APP_NAME";
 #[cfg(debug_assertions)]
