@@ -5,6 +5,7 @@ mod automations;
 mod azure_devops;
 mod chat_background;
 mod checkpoint;
+mod codex_accounts;
 mod control;
 pub mod control_cli;
 mod cursor_store;
@@ -453,6 +454,14 @@ pub fn run() {
             pi_usage::fetch_pi_usage,
             rate_limits::fetch_claude_usage,
             rate_limits::fetch_opencode_go_usage,
+            codex_accounts::codex_accounts_list,
+            codex_accounts::codex_account_upsert,
+            codex_accounts::codex_account_remove,
+            codex_accounts::codex_account_update_state,
+            codex_accounts::codex_account_credentials,
+            codex_accounts::codex_account_refresh,
+            codex_accounts::codex_auth_json_read,
+            codex_accounts::codex_auth_json_refresh,
             pty::pty_spawn,
             pty::pty_write,
             pty::pty_resize,

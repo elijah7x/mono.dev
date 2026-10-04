@@ -45,6 +45,11 @@ export class JsonRpcClient {
   private closed = false;
   private readonly includeJsonrpc: boolean;
   private readonly label: string;
+  /**
+   * When set, writes fail if the session's child process was replaced — a
+   * late response must never land in a respawned process's stdin.
+   */
+  expectedPid = 0;
 
   constructor(
     private readonly sessionId: string,
@@ -152,6 +157,7 @@ export class JsonRpcClient {
   }
 
   async respond(id: JsonRpcId, result: unknown): Promise<void> {
+    if (this.closed && this.expectedPid) return;
     await this.send({
       ...(this.includeJsonrpc ? { jsonrpc: "2.0" } : {}),
       id,
@@ -163,6 +169,7 @@ export class JsonRpcClient {
     id: JsonRpcId,
     error: { code: number; message: string; data?: unknown },
   ): Promise<void> {
+    if (this.closed && this.expectedPid) return;
     await this.send({
       ...(this.includeJsonrpc ? { jsonrpc: "2.0" } : {}),
       id,
@@ -171,6 +178,10 @@ export class JsonRpcClient {
   }
 
   private async send(payload: object): Promise<void> {
+    // Only a client bound to one child generation refuses to write once
+    // closed; others still answer pending requests as the process exits.
+    if (this.closed && this.expectedPid)
+      throw new Error("Harness process is not running");
     // Bound the write: a child that stops draining stdin must not let a
     // blocked harness_write outlive the request's own deadline (or wedge a
     // cancellation waiting on the session/cancel notify).
@@ -178,7 +189,7 @@ export class JsonRpcClient {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([
-        writeChild(this.sessionId, line),
+        writeChild(this.sessionId, line, this.expectedPid || undefined),
         new Promise<never>((_, reject) => {
           timer = setTimeout(
             () => reject(new Error("harness write timed out")),
