@@ -8,6 +8,7 @@ import {
   resolveFxBinary,
   resolveGrokBinary,
   resolveHermesBinary,
+  resolveKimiBinary,
   resolveOmpBinary,
   resolveOpenCodeBinary,
   resolvePiBinary,
@@ -51,6 +52,7 @@ const CLI: Record<HarnessId, { name: string; install?: string }> = {
       "Install from hermes-agent.nousresearch.com, then run hermes model",
   },
   antigravity: { name: "Antigravity ACP server (agy_acp_server.par)" },
+  kimi: { name: "Kimi Code CLI", install: "https://moonshotai.github.io/kimi-code/" },
 };
 
 let inflight: Promise<void> | null = null;
@@ -155,6 +157,14 @@ export function probeHarnessAvailability(
       if (id === "antigravity") {
         try {
           await resolveAntigravityBinary();
+          return [id, true] as const;
+        } catch {
+          return [id, false] as const;
+        }
+      }
+      if (id === "kimi") {
+        try {
+          await resolveKimiBinary();
           return [id, true] as const;
         } catch {
           return [id, false] as const;

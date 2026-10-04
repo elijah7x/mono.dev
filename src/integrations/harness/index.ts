@@ -106,6 +106,15 @@ export {
   respondAntigravityApproval,
   bindAntigravitySession,
 } from "./providers/antigravity/antigravity";
+export {
+  sendKimiTurn,
+  steerKimiTurn,
+  cancelKimiTurn,
+  stopKimiSession,
+  forgetKimiSession,
+  respondKimiApproval,
+  bindKimiSession,
+} from "./providers/kimi/kimi";
 export { generateCursorSessionTitle } from "./providers/cursor/cursorTitle";
 export { generateCodexSessionTitle } from "./providers/codex/codexTitle";
 export { generateOpenCodeSessionTitle } from "./providers/opencode/opencodeTitle";
@@ -156,6 +165,7 @@ export { refreshFxCatalog } from "./providers/fx/fxCatalog";
 export { refreshGrokCatalog } from "./providers/grok/grokCatalog";
 export { refreshHermesCatalog } from "./providers/hermes/hermesCatalog";
 export { refreshAntigravityCatalog } from "./providers/antigravity/antigravityCatalog";
+export { refreshKimiCatalog } from "./providers/kimi/kimiCatalog";
 export { registerBuiltinHarnesses } from "./core/register";
 export {
   getHarnessAvailabilitySnapshot,

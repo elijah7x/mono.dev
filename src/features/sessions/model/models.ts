@@ -198,6 +198,12 @@ export const MODELS: AgentModel[] = [
     name: "Gemini 3.8 Flash (High)",
     nativeId: "gemini-3.8-flash-high",
   },
+  {
+    id: "kimi:kimi-code/kimi-for-coding",
+    harness: "kimi",
+    name: "K2.8 Preview",
+    nativeId: "kimi-code/kimi-for-coding",
+  },
 ];
 
 export const DEFAULT_MODEL_ID: Record<HarnessId, string> = {
@@ -211,6 +217,7 @@ export const DEFAULT_MODEL_ID: Record<HarnessId, string> = {
   fx: "fx:zai/glm-5.2-fast",
   hermes: "hermes:default",
   antigravity: "antigravity:gemini-3.8-flash-high",
+  kimi: "kimi:kimi-code/kimi-for-coding",
 };
 
 const FAVORITES_KEY = "monocode.favoriteModels";
@@ -240,6 +247,7 @@ const HARNESS_ORDER: HarnessId[] = [
   "fx",
   "hermes",
   "antigravity",
+  "kimi",
 ];
 
 const EMPTY_MODELS: AgentModel[] = [];

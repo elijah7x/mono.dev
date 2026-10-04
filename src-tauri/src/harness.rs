@@ -807,6 +807,18 @@ pub fn harness_resolve_antigravity() -> Result<AntigravityBinary, String> {
         })
 }
 
+/// Resolve Kimi Code, not the legacy Python kimi-cli.
+#[tauri::command(async)]
+pub fn harness_resolve_kimi() -> Result<CursorBinary, String> {
+    resolve_kimi()
+        .map(|path| CursorBinary {
+            path: path.to_string_lossy().into_owned(),
+        })
+        .ok_or_else(|| {
+            "Kimi Code CLI not found. Install Kimi Code from https://moonshotai.github.io/kimi-code/ and run `kimi login`.".into()
+        })
+}
+
 /// Bind an ephemeral loopback port for `opencode serve`.
 #[tauri::command]
 pub fn harness_free_port() -> Result<u16, String> {
@@ -1677,6 +1689,7 @@ fn is_harness_argv_token(part: &str) -> bool {
             | "fx"
             | "hermes"
             | "agy_acp_server.par"
+            | "kimi"
             | "pi"
             | "worker-server"
             | "app-server"
@@ -1916,6 +1929,7 @@ fn resolve_harness_binary_default(provider: &str) -> Option<PathBuf> {
         "fx" => resolve_fx(),
         "hermes" => resolve_hermes(),
         "antigravity" => resolve_antigravity(),
+        "kimi" => resolve_kimi(),
         _ => None,
     }
 }
@@ -1961,6 +1975,7 @@ fn resolve_harness_binary_override(provider: &str, binary_path: &str) -> Result<
         "fx" => &["fx"],
         "hermes" => &["hermes"],
         "antigravity" => &["agy_acp_server.par"],
+        "kimi" => &["kimi"],
         _ => {
             return Err(format!(
                 "Unsupported configured harness provider: {provider}"
@@ -2025,6 +2040,15 @@ fn is_supported_harness_version(version: &str) -> bool {
 fn validate_harness_binary_version(provider: &str, path: &Path) -> Result<(), String> {
     if provider == "antigravity" {
         return Ok(());
+    }
+    // Kimi Code's --version output has no stable shape; reject the legacy
+    // Python CLI by the same check the default resolver uses.
+    if provider == "kimi" {
+        return if is_kimi_agent(path) {
+            Ok(())
+        } else {
+            Err("Configured kimi binary is not Kimi Code.".into())
+        };
     }
     let version = exec_capture(&path.to_string_lossy(), &["--version".to_string()], None)?;
     let lower = version.to_ascii_lowercase();
@@ -2342,6 +2366,66 @@ fn resolve_antigravity() -> Option<PathBuf> {
         candidates.push(from_shell);
     }
     first_binary(candidates)
+}
+
+fn resolve_kimi() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(home) = dirs_home().map(PathBuf::from) {
+        candidates.push(home.join(".kimi-code/bin/kimi"));
+        candidates.push(home.join(".local/bin/kimi"));
+        candidates.push(home.join(".npm-global/bin/kimi"));
+    }
+    #[cfg(target_os = "macos")]
+    candidates.push(PathBuf::from("/opt/homebrew/bin/kimi"));
+    candidates.push(PathBuf::from("/usr/local/bin/kimi"));
+    if let Some(from_shell) = which_via_login_shell("kimi") {
+        candidates.push(from_shell);
+    }
+    first_binary_matching(candidates, is_kimi_agent)
+}
+
+fn is_kimi_agent(path: &Path) -> bool {
+    if !is_executable_file(path) || !binary_name_eq(path, "kimi") {
+        return false;
+    }
+    if path
+        .parent()
+        .and_then(Path::parent)
+        .is_some_and(|root| root.file_name().is_some_and(|name| name == ".kimi-code"))
+    {
+        return true;
+    }
+    let mut cmd = Command::new(path);
+    cmd.arg("--help")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    apply_gui_env(&mut cmd);
+    isolate_child(&mut cmd);
+    let Ok(child) = spawn_managed(&mut cmd) else {
+        return false;
+    };
+    let pid = child.id();
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+    match rx.recv_timeout(Duration::from_secs(2)) {
+        Ok(Ok(output)) => {
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+            .to_ascii_lowercase();
+            // The old Python CLI also had ACP: require the new product identity.
+            text.contains("kimi-code") && text.split_whitespace().any(|word| word == "acp")
+        }
+        _ => {
+            terminate(pid);
+            false
+        }
+    }
 }
 
 fn is_pi_coding_agent(path: &Path) -> bool {
@@ -3724,6 +3808,34 @@ mod tests {
             "/home/user/.local/share/agy-acp/agy_acp_server.par"
         ));
         assert!(!looks_like_harness_argv("agy --help"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn kimi_resolver_rejects_legacy_cli_and_requires_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("monocode-kimi-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join(".kimi-code/bin")).unwrap();
+        let installed = dir.join(".kimi-code/bin/kimi");
+        std::fs::write(&installed, b"#!/bin/sh\nexit 0\n").unwrap();
+        assert!(!is_kimi_agent(&installed));
+        std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(is_kimi_agent(&installed));
+
+        let candidate = dir.join("kimi");
+        std::fs::write(&candidate, b"#!/bin/sh\necho 'kimi-code acp'\n").unwrap();
+        std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(is_kimi_agent(&candidate));
+        std::fs::write(&candidate, b"#!/bin/sh\necho 'legacy Python CLI acp'\n").unwrap();
+        assert!(!is_kimi_agent(&candidate));
+        let legacy = dir.join("kimi-cli");
+        std::fs::write(&legacy, b"#!/bin/sh\necho 'kimi-code acp'\n").unwrap();
+        std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!is_kimi_agent(&legacy));
+        assert!(looks_like_harness_argv(
+            "/home/user/.kimi-code/bin/kimi acp"
+        ));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
