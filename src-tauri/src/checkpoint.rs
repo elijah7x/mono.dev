@@ -2127,6 +2127,136 @@ mod tests {
     }
 
     #[test]
+    fn isolated_shell_delta_includes_additions_deletions_and_user_dirty() {
+        let source = tmp("shell-source");
+        let target = tmp("shell-target");
+        assert!(init_git_commit(
+            &source.0,
+            &[("a.txt", "head\n"), ("delete.txt", "delete\n")]
+        ));
+        let from = source.0.to_string_lossy().into_owned();
+        let to = target.0.to_string_lossy().into_owned();
+        assert!(git(&source.0, &["clone", &from, &to]));
+        std::fs::write(source.0.join("a.txt"), "user dirty\n").unwrap();
+        std::fs::write(target.0.join("a.txt"), "user dirty\n").unwrap();
+        let (_root, store) = store();
+        store.ensure_worker("worker", &from).unwrap();
+        #[cfg(unix)]
+        {
+            assert!(Command::new("sh").current_dir(&source.0).args([
+                "-c",
+                "printf 'shell result\\n' > a.txt; rm delete.txt; printf 'diff --git a/new.txt b/new.txt\\nnew file mode 100644\\n--- /dev/null\\n+++ b/new.txt\\n@@ -0,0 +1 @@\\n+new\\n' | git apply",
+            ]).status().unwrap().success());
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(source.0.join("a.txt"), "shell result\n").unwrap();
+            std::fs::remove_file(source.0.join("delete.txt")).unwrap();
+            std::fs::write(source.0.join("new.txt"), "new\n").unwrap();
+        }
+        store
+            .capture_worker("worker", &from, &[".".into()])
+            .unwrap();
+        std::fs::write(target.0.join("a.txt"), "lead conflict\n").unwrap();
+        assert!(store
+            .apply("worker", &from, &to)
+            .unwrap_err()
+            .contains("lead checkout changed"));
+        assert!(target.0.join("delete.txt").exists());
+        assert!(!target.0.join("new.txt").exists());
+        std::fs::write(target.0.join("a.txt"), "user dirty\n").unwrap();
+        let result = store.apply("worker", &from, &to).unwrap();
+        assert_eq!(result.files, ["a.txt", "delete.txt", "new.txt"]);
+        assert_eq!(
+            store.apply("worker", &from, &to).unwrap().already_applied,
+            3
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.0.join("a.txt")).unwrap(),
+            "shell result\n"
+        );
+        assert!(!target.0.join("delete.txt").exists());
+    }
+
+    #[test]
+    fn worker_no_changes_apply_without_touching_lead_dirty_files() {
+        let source = tmp("worker-no-change");
+        let target = tmp("worker-no-change-target");
+        assert!(init_git_commit(&source.0, &[("a.txt", "head\n")]));
+        let from = source.0.to_string_lossy().into_owned();
+        let to = target.0.to_string_lossy().into_owned();
+        assert!(git(&source.0, &["clone", &from, &to]));
+        let (_root, store) = store();
+        store.ensure_worker("worker", &from).unwrap();
+        store
+            .capture_worker("worker", &from, &[".".into()])
+            .unwrap();
+        std::fs::write(target.0.join("a.txt"), "lead dirty\n").unwrap();
+        assert!(store.apply("worker", &from, &to).unwrap().files.is_empty());
+        assert!(store.cleanup_safe("worker", &from).unwrap());
+        assert_eq!(
+            std::fs::read(target.0.join("a.txt")).unwrap(),
+            b"lead dirty\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worker_capture_and_apply_reject_changed_symlink_paths() {
+        use std::os::unix::fs::symlink;
+        let source = tmp("worker-symlink");
+        let target = tmp("worker-symlink-target");
+        assert!(init_git_commit(&source.0, &[("a.txt", "head\n")]));
+        let from = source.0.to_string_lossy().into_owned();
+        let to = target.0.to_string_lossy().into_owned();
+        assert!(git(&source.0, &["clone", &from, &to]));
+        let (_root, store) = store();
+        store.ensure_worker("worker", &from).unwrap();
+        std::fs::write(source.0.join("a.txt"), "worker\n").unwrap();
+        store
+            .capture_worker("worker", &from, &[".".into()])
+            .unwrap();
+        let outside = target.0.join("outside.txt");
+        std::fs::write(&outside, "keep\n").unwrap();
+        std::fs::remove_file(target.0.join("a.txt")).unwrap();
+        symlink(&outside, target.0.join("a.txt")).unwrap();
+        assert!(store
+            .apply("worker", &from, &to)
+            .unwrap_err()
+            .contains("symbolic link"));
+        assert_eq!(std::fs::read(&outside).unwrap(), b"keep\n");
+        std::fs::remove_file(source.0.join("a.txt")).unwrap();
+        symlink(&outside, source.0.join("a.txt")).unwrap();
+        assert!(store
+            .capture_worker("worker", &from, &[".".into()])
+            .unwrap_err()
+            .contains("symbolic link"));
+        assert!(!store.cleanup_safe("worker", &from).unwrap());
+        assert_eq!(
+            store.file_diff("worker", &from, "a.txt").unwrap().current,
+            "worker\n"
+        );
+    }
+
+    #[test]
+    fn worker_initialization_failure_does_not_publish_a_baseline() {
+        let repo = tmp("worker-init-failure");
+        assert!(init_git_commit(&repo.0, &[("a.txt", "head\n")]));
+        let cwd = repo.0.to_string_lossy().into_owned();
+        let (_root, store) = store();
+        let blocked = store.session_dir("worker").join("manifest.json.tmp");
+        std::fs::create_dir_all(&blocked).unwrap();
+        assert!(store.ensure_worker("worker", &cwd).is_err());
+        assert!(store.load_matching("worker", &cwd).unwrap().is_none());
+        assert!(!store.cleanup_safe("worker", &cwd).unwrap());
+        std::fs::remove_dir(blocked).unwrap();
+        store.ensure_worker("worker", &cwd).unwrap();
+        store.capture_worker("worker", &cwd, &[".".into()]).unwrap();
+        assert!(store.cleanup_safe("worker", &cwd).unwrap());
+        assert!(store.status("worker", &cwd).unwrap().files.is_empty());
+    }
+
+    #[test]
     fn worker_failed_recapture_preserves_the_previous_result() {
         let source = tmp("worker-failed-recapture");
         let target = tmp("worker-failed-recapture-target");
@@ -2314,16 +2444,21 @@ mod tests {
         assert!(init_git_commit(&source.0, &[("a.txt", "head\n")]));
         let from = source.0.to_string_lossy().into_owned();
         let (_root, store) = store();
+        assert!(store.verify_worker_baseline("missing", &from).is_err());
         assert!(store
             .capture_worker("missing", &from, &[".".into()])
             .is_err());
         store.ensure("legacy", &from).unwrap();
         assert!(store.ensure_worker("legacy", &from).is_err());
+        assert!(store.verify_worker_baseline("legacy", &from).is_err());
         assert!(store
             .capture_worker("legacy", &from, &[".".into()])
             .is_err());
         store.ensure_worker("worker", &from).unwrap();
+        std::fs::write(source.0.join("a.txt"), "interrupted shell edit\n").unwrap();
+        store.verify_worker_baseline("worker", &from).unwrap();
         std::fs::remove_file(store.session_dir("worker").join("files/a.txt")).unwrap();
+        assert!(store.verify_worker_baseline("worker", &from).is_err());
         assert!(store
             .capture_worker("worker", &from, &[".".into()])
             .unwrap_err()
@@ -2431,6 +2566,94 @@ mod tests {
     }
 
     #[test]
+    fn worker_branch_moved_fails_closed_for_every_reuse_path() {
+        let source = tmp("worker-branch-moved");
+        assert!(init_git_commit(&source.0, &[("a.txt", "head\n")]));
+        let from = source.0.to_string_lossy().into_owned();
+        let (_root, store) = store();
+        store.ensure_worker("worker", &from).unwrap();
+        std::fs::write(source.0.join("a.txt"), "worker\n").unwrap();
+        assert!(git(&source.0, &["add", "-A"]));
+        assert!(git(&source.0, &["commit", "-m", "worker commit"]));
+        assert!(store
+            .verify_worker_baseline("worker", &from)
+            .unwrap_err()
+            .contains("branch moved"));
+        assert!(store
+            .ensure_worker("worker", &from)
+            .unwrap_err()
+            .contains("branch moved"));
+        assert!(store
+            .capture_worker("worker", &from, &[".".into()])
+            .unwrap_err()
+            .contains("branch moved"));
+        assert!(!store.cleanup_safe("worker", &from).unwrap());
+    }
+
+    #[test]
+    fn worker_capture_scope_prefixes_match_directories_not_names() {
+        let source = tmp("worker-scope-prefix");
+        assert!(init_git_commit(
+            &source.0,
+            &[
+                ("src/inside.txt", "head\n"),
+                ("src/deep/nested.txt", "head\n"),
+                ("src2/outside.txt", "head\n")
+            ]
+        ));
+        let from = source.0.to_string_lossy().into_owned();
+        let (_root, store) = store();
+        store.ensure_worker("worker", &from).unwrap();
+        std::fs::write(source.0.join("src/inside.txt"), "worker\n").unwrap();
+        std::fs::write(source.0.join("src/deep/nested.txt"), "worker\n").unwrap();
+        std::fs::write(source.0.join("src2/outside.txt"), "worker\n").unwrap();
+        assert!(store
+            .capture_worker("worker", &from, &["src".into()])
+            .unwrap_err()
+            .contains("src2/outside.txt outside its assignment"));
+        std::fs::write(source.0.join("src2/outside.txt"), "head\n").unwrap();
+        store
+            .capture_worker("worker", &from, &["src".into()])
+            .unwrap();
+        assert_eq!(
+            relatives(&store.status("worker", &from).unwrap()),
+            ["src/deep/nested.txt", "src/inside.txt"]
+        );
+    }
+
+    #[test]
+    fn apply_completes_a_crash_left_partial_application() {
+        let source = tmp("apply-partial-source");
+        let target = tmp("apply-partial-target");
+        assert!(init_git_commit(
+            &source.0,
+            &[("a.txt", "head-a\n"), ("z.txt", "head-z\n")]
+        ));
+        let from = source.0.to_string_lossy().into_owned();
+        let to = target.0.to_string_lossy().into_owned();
+        assert!(git(&source.0, &["clone", &from, &to]));
+        let (_root, store) = store();
+        store.ensure_worker("worker", &from).unwrap();
+        std::fs::write(source.0.join("a.txt"), "worker-a\n").unwrap();
+        std::fs::write(source.0.join("z.txt"), "worker-z\n").unwrap();
+        store
+            .capture_worker("worker", &from, &[".".into()])
+            .unwrap();
+        // Simulate the app dying between the two writes: one path is already
+        // applied, the other is still at the seeded baseline.
+        std::fs::write(target.0.join("a.txt"), "worker-a\n").unwrap();
+        let resumed = store.apply("worker", &from, &to).unwrap();
+        assert_eq!(resumed.files, ["a.txt", "z.txt"]);
+        assert_eq!(resumed.already_applied, 1);
+        assert_eq!(
+            std::fs::read_to_string(target.0.join("z.txt")).unwrap(),
+            "worker-z\n"
+        );
+        let retried = store.apply("worker", &from, &to).unwrap();
+        assert_eq!(retried.already_applied, 2);
+    }
+
+    #[test]
     fn worker_late_prepare_cannot_replace_the_original_baseline() {
         let source = tmp("worker-late-prepare");
         assert!(init_git_commit(&source.0, &[("a.txt", "head\n")]));
@@ -2496,6 +2719,7 @@ mod tests {
     #[test]
     fn rejects_invalid_session_id() {
         let err = validate_id("../x", "session").unwrap_err();
+
         assert!(err.contains("Invalid"));
     }
 }

@@ -1,3 +1,5 @@
+// Adapted from AmeinEskinder, hardbeat920/monocode PR #565 (186613a4).
+// Local increment: retained/reused checkouts must validate an existing baseline before dispatch.
 use super::*;
 use sha2::{Digest, Sha256};
 use std::io::Read;
@@ -100,12 +102,37 @@ pub(super) fn fingerprint(root: &Path, relative: &str) -> Result<String, String>
 }
 
 impl CheckpointStore {
+    pub(super) fn verify_worker_baseline(&self, session_id: &str, cwd: &str) -> Result<(), String> {
+        let manifest = self.load_matching(session_id, cwd)?.ok_or(
+            "This retained worker has no original isolated baseline. Its checkout was kept for recovery.",
+        )?;
+        let baseline = manifest.worker.as_ref().ok_or(
+            "This retained worker has no original isolated baseline. Its checkout was kept for recovery.",
+        )?;
+        if baseline.head != git_head(&project_root(cwd)?)? {
+            return Err(
+                "The worker branch moved after its baseline. The worktree was kept.".into(),
+            );
+        }
+        for (relative, kind) in &manifest.files {
+            if *kind == SnapshotKind::Contents
+                && read_snapshot(&self.session_dir(session_id), relative, *kind)
+                    == FileState::Missing
+            {
+                return Err(format!(
+                    "Missing baseline snapshot for {relative}. The worker worktree was kept."
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn ensure_worker(&self, session_id: &str, cwd: &str) -> Result<(), String> {
         let root = project_root(cwd)?;
         let dir = self.session_dir(session_id);
         if let Some(manifest) = read_manifest(&dir)? {
             if same_cwd(&manifest.cwd, cwd) && manifest.worker.is_some() {
-                return Ok(());
+                return self.verify_worker_baseline(session_id, cwd);
             }
             return Err("This retained worker has no original isolated baseline. Its checkout was kept for recovery.".into());
         }
@@ -286,11 +313,17 @@ pub async fn worker_checkpoint_ensure(
     store: State<'_, CheckpointStore>,
     session_id: String,
     cwd: String,
+    existing_only: Option<bool>,
 ) -> Result<(), String> {
     validate_id(&session_id, "session")?;
     let store = store.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        store.exclusive(|store| store.ensure_worker(&session_id, &cwd))
+        store.exclusive(|store| {
+            if existing_only.unwrap_or(false) {
+                return store.verify_worker_baseline(&session_id, &cwd);
+            }
+            store.ensure_worker(&session_id, &cwd)
+        })
     })
     .await
     .map_err(|e| e.to_string())?

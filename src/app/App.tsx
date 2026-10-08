@@ -7554,6 +7554,9 @@ function Workspace({
             workCwd,
             event,
             orchestrator.forSession(sessionId)?.leadId,
+            orchestrator.forSession(sessionId)?.tasks.find(
+              (task) => task.sessionId === sessionId,
+            )?.workspacePolicy,
           );
           const routed = routePlanEvent(event);
           if (routed) enqueueHarnessEvent(sessionId, routed);
@@ -10040,6 +10043,7 @@ function Workspace({
           createdCheckout
             ? () => removeOrchestrationWorktree(leadCheckoutCwd, checkoutCwd)
             : undefined,
+          createdCheckout,
         );
         const scratchDir = await invoke<string>("control_attach_worker", {
           leadId: run.leadId,

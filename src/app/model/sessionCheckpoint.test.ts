@@ -58,6 +58,7 @@ describe("worker checkpoint lifecycle", () => {
     expect(invoke).toHaveBeenCalledWith("worker_checkpoint_ensure", {
       sessionId: "worker",
       cwd: checkoutCwd,
+      existingOnly: false,
     });
     expect(ready).not.toHaveBeenCalled();
     release();
@@ -79,7 +80,9 @@ describe("worker checkpoint lifecycle", () => {
       { sessionId: "worker", workspace },
       checkoutCwd,
     );
-    expect(invoke).not.toHaveBeenCalled();
+    expect(invoke).toHaveBeenCalledExactlyOnceWith("worker_checkpoint_ensure", {
+      sessionId: "worker", cwd: checkoutCwd, existingOnly: true,
+    });
   });
 
   it("does not rebaseline a legacy shared worker without workspace metadata", async () => {
@@ -96,7 +99,7 @@ describe("worker checkpoint lifecycle", () => {
     trackSessionEdits("worker", checkoutCwd, completed, "lead");
     await applySessionCheckpoint("worker", checkoutCwd, "/repo");
     expect(vi.mocked(invoke).mock.calls).toEqual([
-      ["worker_checkpoint_ensure", { sessionId: "worker", cwd: checkoutCwd }],
+      ["worker_checkpoint_ensure", { sessionId: "worker", cwd: checkoutCwd, existingOnly: false }],
       [
         "session_checkpoint_prepare",
         {
@@ -133,6 +136,7 @@ describe("worker checkpoint lifecycle", () => {
     trackSessionEdits("worker", checkoutCwd, completed, "lead");
     await flushSessionCheckpoint("worker");
     expect(vi.mocked(invoke).mock.calls.map(([command]) => command)).toEqual([
+      "worker_checkpoint_ensure",
       "session_checkpoint_prepare",
       "session_checkpoint_capture",
     ]);
@@ -174,6 +178,26 @@ describe("worker checkpoint lifecycle", () => {
       remove,
     );
     expect(remove).not.toHaveBeenCalled();
+  });
+
+  it("rejects an untrusted retained or reused checkout without removing it", async () => {
+    const remove = vi.fn();
+    vi.mocked(invoke).mockRejectedValue(new Error("no original isolated baseline"));
+    await expect(prepareWorkerCheckpoint(
+      { sessionId: "retained", workspace }, checkoutCwd, remove,
+    )).rejects.toThrow("no original isolated baseline");
+    await expect(prepareWorkerCheckpoint(
+      { sessionId: "reused" }, checkoutCwd, remove, false,
+    )).rejects.toThrow("no original isolated baseline");
+    expect(remove).not.toHaveBeenCalled();
+    expect(vi.mocked(invoke).mock.calls.every(([, args]) => (args as { existingOnly: boolean }).existingOnly)).toBe(true);
+  });
+
+  it("leaves shared worker edit tracking unchanged", async () => {
+    trackSessionEdits("shared", "/repo", started, "lead", "shared");
+    trackSessionEdits("shared", "/repo", completed, "lead", "shared");
+    await flushSessionCheckpoint("shared");
+    expect(invoke).not.toHaveBeenCalled();
   });
 
   it("preserves the failure and reports a checkout that could not be removed", async () => {
@@ -225,6 +249,22 @@ describe("worker checkpoint lifecycle", () => {
     expect(vi.mocked(invoke).mock.calls.map(([command]) => command)).toEqual([
       "session_checkpoint_capture",
       "worker_checkpoint_capture",
+    ]);
+  });
+
+  it("waits for durable final capture before integration", async () => {
+    let release!: () => void;
+    vi.mocked(invoke).mockImplementationOnce(() => new Promise<void>((resolve) => { release = resolve; }));
+    const task = { sessionId: "durable", files: ["."] };
+    const integrated = settleWorkerCheckpoint(task, checkoutCwd, async () => {}).then(
+      () => applySessionCheckpoint(task.sessionId, checkoutCwd, "/repo"),
+    );
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledOnce());
+    expect(vi.mocked(invoke).mock.calls[0][0]).toBe("worker_checkpoint_capture");
+    release();
+    await integrated;
+    expect(vi.mocked(invoke).mock.calls.map(([command]) => command)).toEqual([
+      "worker_checkpoint_capture", "session_checkpoint_apply",
     ]);
   });
 

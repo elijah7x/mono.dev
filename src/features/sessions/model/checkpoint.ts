@@ -86,9 +86,10 @@ export function ensureSessionCheckpoint(
 export function ensureWorkerCheckpoint(
   sessionId: string,
   cwd: string,
+  existingOnly = false,
 ): Promise<void> {
   return enqueueCheckpoint(sessionId, () =>
-    invoke<void>("worker_checkpoint_ensure", { sessionId, cwd }),
+    invoke<void>("worker_checkpoint_ensure", { sessionId, cwd, existingOnly }),
   );
 }
 

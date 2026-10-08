@@ -3924,6 +3924,35 @@ mod tests {
     }
 
     #[test]
+    fn session_stop_tracks_background_descendants_after_natural_exit() {
+        let host = HarnessHost::new();
+        let (epoch, kill_all, _) = begin_test_spawn(&host, "background");
+        let (live, mut child) = live_group("sleep 30 & echo $!; exit 0");
+        let mut line = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let descendant: u32 = line.trim().parse().unwrap();
+        let pid = live.pid;
+        assert!(host
+            .install_spawn("background".into(), epoch, kill_all, Arc::clone(&live))
+            .is_none());
+        live.exit.record(child.wait());
+        let retained = host.child_exited("background", &live);
+        let owned = host.has_working_dir(Path::new("/test"));
+        let stop = host.stop_session("background");
+        assert!(
+            retained && owned,
+            "natural wrapper exit lost its live descendants"
+        );
+        assert!(stop.is_ok(), "{stop:?}");
+        assert!(!tree_alive(pid));
+        assert!(!process_alive(descendant));
+        assert!(!host.has_working_dir(Path::new("/test")));
+        assert!(host.stop_session("background").is_ok());
+    }
+
+    #[test]
     fn session_stop_retains_the_working_dir_until_the_tree_exits() {
         let host = Arc::new(HarnessHost::new());
         let (pid, waiter) = install_live_group(

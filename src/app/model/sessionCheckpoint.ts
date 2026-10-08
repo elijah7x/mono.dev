@@ -1,3 +1,6 @@
+// Adapted from AmeinEskinder, https://github.com/hardbeat920/monocode/pull/565.
+// Unlike that revision, retained/reused workers validate existing history before dispatch;
+// shared workers keep their previous edit-tracking behavior.
 import type { OrchestrationTask } from "../../features/orchestration/model/orchestrationState";
 import {
   captureSessionCheckpoint,
@@ -15,13 +18,13 @@ export async function prepareWorkerCheckpoint(
   task: Pick<OrchestrationTask, "sessionId" | "workspace" | "workspacePolicy">,
   checkoutCwd: string,
   discardNewCheckout?: () => Promise<unknown>,
+  createdCheckout = !task.workspace,
 ): Promise<void> {
-  // Retained and legacy shared workers may already have edits to preserve.
-  if (task.workspace || task.workspacePolicy === "shared") return;
+  if (task.workspacePolicy === "shared") return;
   try {
-    await ensureWorkerCheckpoint(task.sessionId, checkoutCwd);
+    await ensureWorkerCheckpoint(task.sessionId, checkoutCwd, !createdCheckout);
   } catch (error) {
-    if (discardNewCheckout) {
+    if (createdCheckout && discardNewCheckout) {
       try {
         await discardNewCheckout();
       } catch (cleanupError) {
@@ -50,8 +53,9 @@ export function trackSessionEdits(
   cwd: string,
   event: HarnessEvent,
   orchestrationLeadId?: string,
+  workspacePolicy?: OrchestrationTask["workspacePolicy"],
 ) {
-  if (sessionId === orchestrationLeadId) return;
+  if (sessionId === orchestrationLeadId || workspacePolicy === "shared") return;
   if (event.type !== "tool.started" && event.type !== "tool.updated") return;
   if (!isEditTool(event.kind, event.title, event.preview)) return;
   const paths = [
